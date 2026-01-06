@@ -20,7 +20,6 @@ class Config:
     max_position_btc: float
     volatility_window_sec: int
     volatility_threshold_bps: int
-    loop_interval_sec: float
     
     @classmethod
     def from_dict(cls, data: dict) -> "Config":
@@ -33,7 +32,6 @@ class Config:
             max_position_btc=data["max_position_btc"],
             volatility_window_sec=data["volatility_window_sec"],
             volatility_threshold_bps=data["volatility_threshold_bps"],
-            loop_interval_sec=data.get("loop_interval_sec", 1.0),
         )
 
 

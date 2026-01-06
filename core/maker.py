@@ -1,10 +1,8 @@
 """Market making logic for StandX Maker Bot.
 
-Implements the main loop:
-1. Check position - stop if too large
-2. Check and cancel orders that are too close to price
-3. Check volatility - wait if too high
-4. Place missing buy/sell orders
+Event-driven design:
+- Price updates trigger order checks
+- Order placement runs when conditions are met
 """
 import uuid
 import logging
@@ -27,6 +25,7 @@ class Maker:
         self.client = client
         self.state = state
         self._running = False
+        self._pending_check = asyncio.Event()
     
     async def initialize(self):
         """Initialize state from exchange."""
@@ -64,27 +63,46 @@ class Maker:
             f"sell_order={self.state.has_order('sell')}"
         )
     
+    def on_price_update(self, price: float):
+        """
+        Called when price updates from WebSocket.
+        Triggers order check if needed.
+        """
+        self.state.update_price(price, self.config.volatility_window_sec)
+        
+        # Signal that we need to check orders
+        self._pending_check.set()
+    
     async def run(self):
-        """Run the main maker loop."""
+        """Run the event-driven maker loop."""
         self._running = True
-        logger.info("Maker loop started")
+        logger.info("Maker started (event-driven mode)")
         
         while self._running:
             try:
+                # Wait for price update signal (with timeout for periodic checks)
+                try:
+                    await asyncio.wait_for(self._pending_check.wait(), timeout=5.0)
+                    self._pending_check.clear()
+                except asyncio.TimeoutError:
+                    # Periodic check even without price updates
+                    pass
+                
                 await self._tick()
+                
             except Exception as e:
                 logger.error(f"Maker tick error: {e}", exc_info=True)
-            
-            await asyncio.sleep(self.config.loop_interval_sec)
+                await asyncio.sleep(1)  # Brief pause on error
         
-        logger.info("Maker loop stopped")
+        logger.info("Maker stopped")
     
     async def stop(self):
         """Stop the maker loop."""
         self._running = False
+        self._pending_check.set()  # Wake up the loop
     
     async def _tick(self):
-        """Single iteration of the maker loop."""
+        """Single iteration of the maker logic."""
         # Wait for price data
         if self.state.last_price is None:
             logger.debug("Waiting for price data...")

@@ -69,12 +69,12 @@ async def main(config_path: str):
         
         await user_ws.connect()
         
-        # Register price callback
+        # Register price callback - triggers order checks
         def on_price(data):
             price_data = data.get("data", {})
             last_price = price_data.get("last_price")
             if last_price:
-                state.update_price(float(last_price), config.volatility_window_sec)
+                maker.on_price_update(float(last_price))
                 logger.debug(f"Price update: {last_price}")
         
         market_ws.on_price(on_price)
