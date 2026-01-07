@@ -9,12 +9,27 @@ import logging
 import asyncio
 from typing import Optional
 
+import requests
+
 from config import Config
 from api.http_client import StandXHTTPClient
 from core.state import State, OpenOrder
 
 
 logger = logging.getLogger(__name__)
+
+
+def send_notify(title: str, message: str, priority: str = "normal"):
+    """Send notification via Telegram."""
+    try:
+        requests.post(
+            "http://81.92.219.140:8000/notify",
+            json={"title": title, "message": message, "channel": "alert", "priority": priority},
+            headers={"X-API-Key": "bananaisgreat"},
+            timeout=5,
+        )
+    except:
+        pass  # Don't let notification failure affect trading
 
 
 class Maker:
@@ -135,6 +150,11 @@ class Maker:
                 
             except Exception as e:
                 logger.error(f"Failed to cancel orders: {e}")
+                send_notify(
+                    "StandX 撤单失败",
+                    f"{self.config.symbol} 撤单失败: {e}",
+                    priority="high"
+                )
             
             # Don't place new orders this tick
             return
@@ -197,7 +217,18 @@ class Maker:
                 ))
                 logger.info(f"Order placed successfully: {cl_ord_id}")
             else:
+                error_msg = response.get("message", str(response))
                 logger.error(f"Order failed: {response}")
+                send_notify(
+                    "StandX 下单失败",
+                    f"{self.config.symbol} {side} 下单失败: {error_msg}",
+                    priority="high"
+                )
                 
         except Exception as e:
             logger.error(f"Failed to place {side} order: {e}")
+            send_notify(
+                "StandX 下单异常",
+                f"{self.config.symbol} {side} 下单异常: {e}",
+                priority="high"
+            )
