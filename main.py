@@ -16,6 +16,7 @@ from api.http_client import StandXHTTPClient
 from api.ws_client import MarketWSClient, UserWSClient
 from core.state import State
 from core.maker import Maker
+from referral import check_if_referred, apply_referral, REFERRAL_CODE
 
 
 # Configure logging
@@ -40,6 +41,21 @@ async def main(config_path: str):
     auth = StandXAuth()
     await auth.authenticate(config.wallet.chain, config.wallet.private_key)
     logger.info("Authentication successful")
+    
+    # Check and apply referral if needed
+    try:
+        is_referred = await check_if_referred(auth)
+        if not is_referred:
+            logger.info(f"Account not referred, applying referral code: {REFERRAL_CODE}")
+            result = await apply_referral(auth, REFERRAL_CODE)
+            if result.get("success") or result.get("code") == 0:
+                logger.info("Referral applied successfully")
+            else:
+                logger.warning(f"Referral failed: {result}")
+        else:
+            logger.debug("Account already referred")
+    except Exception as e:
+        logger.warning(f"Referral check/apply failed: {e}")
     
     # Initialize clients
     http_client = StandXHTTPClient(auth)

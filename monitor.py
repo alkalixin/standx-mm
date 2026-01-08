@@ -10,7 +10,9 @@ import asyncio
 import argparse
 import time
 import logging
-from dataclasses import dataclass
+import os
+from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
 from typing import List, Dict
 
 import requests
@@ -32,6 +34,8 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL_SEC = 60  # 1 minute
 STATUS_REPORT_INTERVAL_SEC = 2 * 60 * 60  # 2 hours
 EQUITY_DROP_THRESHOLD = 0.10  # 10% drop triggers alert
+POSITION_ALERT_MULTIPLIER = 5  # Alert if position > order_size * 5
+STATUS_LOG_FILE = "status.log"
 
 
 def send_notify(title: str, message: str, channel: str = "info", priority: str = "normal"):
@@ -56,16 +60,18 @@ class AccountState:
     auth: StandXAuth
     initial_equity: float = 0.0
     current_equity: float = 0.0
+    position: float = 0.0  # Position size (negative = short)
+    upnl: float = 0.0  # Unrealized PnL
     trader_pts: float = 0.0
     maker_pts: float = 0.0
     holder_pts: float = 0.0
-    uptime_tier: str = "-"
-    uptime_eligible: float = 0.0
+    uptime_12h: str = ""  # 12-hour uptime visualization ████░░░░
     low_equity_alerted: bool = False
+    high_position_alerted: bool = False
 
 
 async def query_balance(auth: StandXAuth) -> Dict:
-    """Query account balance."""
+    """Query account balance and position."""
     url = "https://perps.standx.com/api/query_balance"
     headers = auth.get_auth_headers()
     headers["Accept"] = "application/json"
@@ -76,14 +82,69 @@ async def query_balance(auth: StandXAuth) -> Dict:
         return response.json()
 
 
+async def query_position(auth: StandXAuth, symbol: str) -> Dict:
+    """Query position for a symbol."""
+    url = f"https://perps.standx.com/api/query_positions?symbol={symbol}"
+    headers = auth.get_auth_headers()
+    headers["Accept"] = "application/json"
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Handle both list and dict response formats
+        if isinstance(data, list):
+            positions = data
+        else:
+            positions = data.get("positions", [])
+        
+        if positions:
+            return positions[0]
+        return {}
+
+
+def build_uptime_bar(hours_data: List[Dict]) -> str:
+    """Build 12-hour uptime visualization bar.
+    
+    █ = UP (has data for that hour)
+    ░ = DOWN (no data for that hour)
+    
+    Returns a string like: ████░░░░████ (oldest to newest, left to right)
+    """
+    now = datetime.now(timezone.utc)
+    # Round down to current hour
+    current_hour = now.replace(minute=0, second=0, microsecond=0)
+    
+    # Build set of hours that have uptime data
+    uptime_hours = set()
+    for h in hours_data:
+        hour_str = h.get("hour", "")
+        try:
+            dt = datetime.fromisoformat(hour_str.replace("Z", "+00:00"))
+            uptime_hours.add(dt.replace(minute=0, second=0, microsecond=0))
+        except:
+            pass
+    
+    # Build bar for last 12 hours (oldest to newest)
+    bar = ""
+    for i in range(11, -1, -1):  # 11 hours ago to now
+        hour = current_hour - timedelta(hours=i)
+        if hour in uptime_hours:
+            bar += "█"
+        else:
+            bar += "░"
+    
+    return bar
+
+
 async def query_all_stats(auth: StandXAuth) -> Dict:
     """Query all points and uptime for an account."""
     stats = {
         "trader_pts": 0.0,
         "maker_pts": 0.0,
         "holder_pts": 0.0,
-        "uptime_tier": "N/A",
-        "uptime_eligible": 0.0,
+        "uptime_12h": "░" * 12,  # Default: all down
     }
     
     headers = {"Authorization": f"Bearer {auth.token}", "Accept": "application/json"}
@@ -113,19 +174,14 @@ async def query_all_stats(auth: StandXAuth) -> Dict:
         except:
             pass
         
-        # Uptime (most recent hour)
+        # Uptime (12 hours visualization)
         try:
             uptime_headers = auth.get_auth_headers("")
             uptime_headers["Accept"] = "application/json"
             r = await client.get("https://perps.standx.com/api/maker/uptime", headers=uptime_headers)
             if r.status_code == 200:
                 hours = r.json().get("hours", [])
-                if hours:
-                    latest = hours[-1]  # Most recent hour
-                    tier = latest.get("tier", "")
-                    tier_map = {"tier_a": "A", "tier_b": "B", "tier_c": "C", "tier_d": "D"}
-                    stats["uptime_tier"] = tier_map.get(tier, "-")
-                    stats["uptime_eligible"] = latest.get("eligible_hour", 0)
+                stats["uptime_12h"] = build_uptime_bar(hours)
         except:
             pass
     
@@ -158,15 +214,22 @@ async def init_account(config_path: str) -> AccountState:
 async def poll_account(account: AccountState) -> bool:
     """Poll account status. Returns True if successful."""
     try:
+        # Query balance
         balance_data = await query_balance(account.auth)
         account.current_equity = float(balance_data.get("equity", 0) or 0)
+        account.upnl = float(balance_data.get("upnl", 0) or 0)
         
+        # Query position
+        pos_data = await query_position(account.auth, account.config.symbol)
+        account.position = float(pos_data.get("qty", 0) or 0)
+        
+        # Query stats
         stats = await query_all_stats(account.auth)
         account.trader_pts = stats["trader_pts"]
         account.maker_pts = stats["maker_pts"]
         account.holder_pts = stats["holder_pts"]
-        account.uptime_tier = stats["uptime_tier"]
-        account.uptime_eligible = stats["uptime_eligible"]
+        account.uptime_12h = stats["uptime_12h"]
+        
         return True
     except Exception as e:
         logger.error(f"Failed to poll {account.config_path}: {e}")
@@ -194,18 +257,57 @@ def check_equity_alert(account: AccountState):
         account.low_equity_alerted = False
 
 
+def check_position_alert(account: AccountState):
+    """Check if position exceeds threshold and send alert."""
+    order_size = account.config.order_size_btc
+    threshold = order_size * POSITION_ALERT_MULTIPLIER
+    
+    if abs(account.position) > threshold and not account.high_position_alerted:
+        account.high_position_alerted = True
+        name = account.config_path.replace(".yaml", "").replace("config-", "").replace("config", "main")
+        msg = f"{name} 仓位告警: {account.position:.4f} BTC (阈值: ±{threshold:.4f})"
+        send_notify("仓位告警", msg, channel="info", priority="normal")
+    
+    # Reset alert if position reduced
+    if abs(account.position) < threshold * 0.5:
+        account.high_position_alerted = False
+
+
 def send_status_report(accounts: List[AccountState]):
     """Send periodic status report."""
     lines = []
     for acc in accounts:
         name = acc.config_path.replace(".yaml", "").replace("config-", "").replace("config", "main")
-        # Format: name: $equity T/M/H pts Uptime
+        # Format: name: $equity pos uPNL pts uptime
+        pos_str = f"pos:{acc.position:+.4f}"
+        upnl_str = f"uPNL:{acc.upnl:+.2f}"
         pts_str = f"T{acc.trader_pts:.0f}/M{acc.maker_pts:.0f}/H{acc.holder_pts:.0f}"
-        uptime_str = f"U:{acc.uptime_tier}"
-        lines.append(f"{name}: ${acc.current_equity:,.0f} {pts_str} {uptime_str}")
+        uptime_str = f"[{acc.uptime_12h}]"
+        lines.append(f"{name}: ${acc.current_equity:,.0f} {pos_str} {upnl_str} {pts_str} {uptime_str}")
     
     msg = "\n".join(lines)
     send_notify("StandX 状态", msg, channel="info", priority="normal")
+
+
+def write_status_log(accounts: List[AccountState]):
+    """Write current status to log file."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    lines = [f"=== StandX Monitor Status @ {timestamp} ===", ""]
+    
+    for acc in accounts:
+        name = acc.config_path.replace(".yaml", "").replace("config-", "").replace("config", "main")
+        lines.append(f"Account: {name}")
+        lines.append(f"  Equity:     ${acc.current_equity:,.2f}")
+        lines.append(f"  Position:   {acc.position:+.4f} BTC")
+        lines.append(f"  uPNL:       ${acc.upnl:+.2f}")
+        lines.append(f"  Points:     T{acc.trader_pts:.0f} / M{acc.maker_pts:.0f} / H{acc.holder_pts:.0f}")
+        lines.append(f"  Uptime 12h: [{acc.uptime_12h}]")
+        lines.append("")
+    
+    # Overwrite the file with current status
+    with open(STATUS_LOG_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
 
 
 async def monitor_loop(accounts: List[AccountState]):
@@ -216,8 +318,9 @@ async def monitor_loop(accounts: List[AccountState]):
     for account in accounts:
         await poll_account(account)
     
-    # Send initial status report
+    # Send initial status report and write log
     send_status_report(accounts)
+    write_status_log(accounts)
     last_report_time = time.time()
     
     while True:
@@ -226,6 +329,10 @@ async def monitor_loop(accounts: List[AccountState]):
             success = await poll_account(account)
             if success:
                 check_equity_alert(account)
+                check_position_alert(account)
+        
+        # Write status log after each poll
+        write_status_log(accounts)
         
         # Periodic status report (every 2 hours)
         now = time.time()
