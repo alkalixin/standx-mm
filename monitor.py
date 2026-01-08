@@ -281,24 +281,27 @@ async def poll_account(account: AccountState) -> bool:
 
 
 def check_equity_alert(account: AccountState):
-    """Check if equity dropped below threshold and send alert."""
+    """Check if equity dropped below threshold and send alert.
+    
+    After alerting, resets baseline to current equity so next alert
+    only triggers on another 10% drop from the new baseline.
+    """
     if account.initial_equity <= 0:
         return
     
     drop_ratio = (account.initial_equity - account.current_equity) / account.initial_equity
     
-    if drop_ratio >= EQUITY_DROP_THRESHOLD and not account.low_equity_alerted:
-        account.low_equity_alerted = True
+    if drop_ratio >= EQUITY_DROP_THRESHOLD:
         msg = (
             f"{account.config_path} 余额告警! "
-            f"初始${account.initial_equity:,.0f} → 当前${account.current_equity:,.0f} "
+            f"基准${account.initial_equity:,.0f} → 当前${account.current_equity:,.0f} "
             f"(降{drop_ratio*100:.1f}%)"
         )
         send_notify("余额告警", msg, channel="alert", priority="critical")
-    
-    # Reset alert if equity recovered
-    if drop_ratio < EQUITY_DROP_THRESHOLD * 0.8:
-        account.low_equity_alerted = False
+        
+        # Reset baseline to current equity
+        # Next alert will only trigger on another 10% drop from here
+        account.initial_equity = account.current_equity
 
 
 def check_position_alert(account: AccountState):
