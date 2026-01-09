@@ -84,9 +84,9 @@ python main.py --config my_config.yaml
 
 ## 其他工具
 
-### 监控脚本
+### 监控脚本（可选）
 
-`monitor.py` 用于监控多个账户状态，支持余额告警和持仓告警。独立于做市机器人运行。
+`monitor.py` 用于监控多个账户状态，支持余额告警和持仓告警。独立于做市机器人运行。需要先行配置 tg-notify 通知服务。
 
 ```bash
 python monitor.py config.yaml config-bot2.yaml config-bot3.yaml
