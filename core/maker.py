@@ -57,6 +57,7 @@ class Maker:
         self.state = state
         self._running = False
         self._pending_check = asyncio.Event()
+        self._reduce_log_file = None  # Will be set by main.py
     
     async def initialize(self):
         """Initialize state from exchange."""
@@ -146,6 +147,11 @@ class Maker:
                 "pausing market making"
             )
             return
+        
+        # Step 1.5: Check if should reduce position (> 50% and profitable)
+        reduced = await self._check_and_reduce_position()
+        if reduced:
+            return  # Skip this tick after reducing
         
         # Step 2: Check and cancel orders that are too close or too far
         orders_to_cancel = self.state.get_orders_to_cancel(
@@ -256,3 +262,100 @@ class Maker:
                 f"{self.config.symbol} {side} 下单异常: {e}",
                 priority="high"
             )
+    
+    def set_reduce_log_file(self, filepath: str):
+        """Set the file path for reduce position logging."""
+        self._reduce_log_file = filepath
+    
+    def _write_reduce_log(self, action: str, qty_change: float, reason: str):
+        """Write reduce position log."""
+        if not self._reduce_log_file:
+            return
+        try:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(self._reduce_log_file, "a") as f:
+                f.write(f"{timestamp},{action},{qty_change:+.4f},{reason}\n")
+        except:
+            pass
+    
+    async def _check_and_reduce_position(self) -> bool:
+        """
+        Check if position should be reduced and execute.
+        
+        Logic:
+        - If abs(position) > max_position * 0.5 AND uPNL > 0
+        - Reduce to max_position * 0.4 using market order
+        
+        Returns:
+            True if reduction was executed, False otherwise
+        """
+        max_pos = self.config.max_position_btc
+        threshold = max_pos * 0.5
+        target = max_pos * 0.4
+        
+        current_pos = abs(self.state.position)
+        if current_pos <= threshold:
+            return False
+        
+        # Query current uPNL for this position
+        try:
+            positions = await self.client.query_positions(self.config.symbol)
+            if not positions:
+                return False
+            
+            upnl = positions[0].upnl
+            if upnl <= 0:
+                logger.debug(f"Position {current_pos:.4f} > threshold but uPNL={upnl:.2f} <= 0, skip reduce")
+                return False
+            
+            # Calculate reduce quantity
+            reduce_qty = current_pos - target
+            if reduce_qty <= 0:
+                return False
+            
+            # Determine side: if position is long, sell to reduce; if short, buy to reduce
+            if self.state.position > 0:
+                reduce_side = "sell"
+            else:
+                reduce_side = "buy"
+            
+            logger.info(
+                f"Reducing position: {self.state.position:+.4f} -> {'+' if self.state.position > 0 else ''}{self.state.position - reduce_qty if self.state.position > 0 else self.state.position + reduce_qty:.4f}, "
+                f"qty={reduce_qty:.4f}, side={reduce_side}, uPNL=${upnl:.2f}"
+            )
+            
+            # Place market order to reduce
+            import math
+            cl_ord_id = f"reduce-{uuid.uuid4().hex[:8]}"
+            
+            # Format quantity
+            qty_str = f"{reduce_qty:.3f}"
+            
+            response = await self.client.new_order(
+                symbol=self.config.symbol,
+                side=reduce_side,
+                qty=qty_str,
+                price="0",  # Market order
+                cl_ord_id=cl_ord_id,
+                order_type="market",
+                reduce_only=True,
+            )
+            
+            if response.get("code") == 0 or "id" in response:
+                logger.info(f"Reduce order placed: {cl_ord_id}")
+                self._write_reduce_log("REDUCE", -reduce_qty if reduce_side == "sell" else reduce_qty, f"profit_take_upnl_{upnl:.2f}")
+                send_notify(
+                    "仓位减仓",
+                    f"{self.config.symbol} 减仓 {reduce_qty:.4f}，uPNL=${upnl:.2f}",
+                    priority="normal"
+                )
+                return True
+            else:
+                logger.error(f"Reduce order failed: {response}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to check/reduce position: {e}")
+            return False
+

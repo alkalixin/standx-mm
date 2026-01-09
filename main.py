@@ -75,6 +75,11 @@ async def main(config_path: str):
     # Initialize maker
     maker = Maker(config, http_client, state)
     
+    # Set reduce position log file
+    reduce_log_file = f"reduce_{config_name}.log"
+    maker.set_reduce_log_file(reduce_log_file)
+    logger.info(f"Reduce position logging to: {reduce_log_file}")
+    
     # Setup shutdown handler
     shutdown_event = asyncio.Event()
     
