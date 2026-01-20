@@ -279,6 +279,71 @@ class Maker:
         except:
             pass
     
+    async def close_position_and_reorder(self, filled_side: str, filled_qty: float):
+        """
+        Close position immediately after a fill, then place new orders.
+        
+        Args:
+            filled_side: The side that was filled ('buy' or 'sell')
+            filled_qty: The quantity that was filled
+        """
+        logger.info(f"=== FILL DETECTED: {filled_side} {filled_qty:.4f} - Closing position immediately ===")
+        
+        try:
+            # Determine close side: if buy was filled (we're now long), sell to close
+            # if sell was filled (we're now short), buy to close
+            close_side = "sell" if filled_side == "buy" else "buy"
+            
+            # Place market order to close the position
+            import uuid
+            cl_ord_id = f"close-{uuid.uuid4().hex[:8]}"
+            qty_str = f"{filled_qty:.3f}"
+            
+            logger.info(f"Placing market {close_side} order to close: {qty_str} (cl_ord_id: {cl_ord_id})")
+            
+            response = await self.client.new_order(
+                symbol=self.config.symbol,
+                side=close_side,
+                qty=qty_str,
+                price="0",  # Market order
+                cl_ord_id=cl_ord_id,
+                order_type="market",
+                reduce_only=True,
+            )
+            
+            if response.get("code") == 0 or "id" in response:
+                logger.info(f"Close order placed successfully: {cl_ord_id}")
+                self._write_reduce_log("CLOSE", filled_qty if close_side == "buy" else -filled_qty, f"fill_close_{filled_side}")
+                send_notify(
+                    "成交平仓",
+                    f"{self.config.symbol} {filled_side} 成交 {filled_qty:.4f}，已市价平仓",
+                    priority="normal"
+                )
+            else:
+                logger.error(f"Close order failed: {response}")
+                send_notify(
+                    "平仓失败",
+                    f"{self.config.symbol} 平仓失败: {response}",
+                    priority="high"
+                )
+            
+            # Wait a bit for the close order to execute
+            await asyncio.sleep(0.5)
+            
+            # Trigger reorder
+            logger.info("Triggering reorder after close...")
+            self._pending_check.set()
+            
+        except Exception as e:
+            logger.error(f"Failed to close position after fill: {e}", exc_info=True)
+            send_notify(
+                "平仓异常",
+                f"{self.config.symbol} 平仓异常: {e}",
+                priority="high"
+            )
+            # Still trigger reorder even if close failed
+            self._pending_check.set()
+    
     async def _check_and_reduce_position(self) -> bool:
         """
         Check if position should be reduced and execute.

@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  standx-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: standx-maker-bot
+    restart: unless-stopped
+    volumes:
+      # Mount config file
+      - ./config.yaml:/app/config.yaml:ro
+      # Mount .env file if using notifications
+      - ./.env:/app/.env:ro
+      # Mount logs directory for persistence
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+    # Uncomment to use custom config file
+    # command: python main.py --config /app/config.yaml
+    
+  # Optional: Run multiple bots with different configs
+  # standx-bot-2:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: standx-maker-bot-2
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./config-bot2.yaml:/app/config.yaml:ro
+  #     - ./.env:/app/.env:ro
+  #     - ./logs:/app/logs
+  #   environment:
+  #     - TZ=Asia/Shanghai

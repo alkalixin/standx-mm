@@ -47,7 +47,7 @@ async def main(config_path: str):
         is_referred = await check_if_referred(auth)
         if not is_referred:
             logger.info(f"Account not referred, applying referral code: {REFERRAL_CODE}")
-            result = await apply_referral(auth, "frozenbanana")
+            result = await apply_referral(auth, "Alkali")
             if result.get("success") or result.get("code") == 0:
                 logger.info("Referral applied successfully")
             else:
@@ -113,8 +113,9 @@ async def main(config_path: str):
             status = order_data.get("status")
             cl_ord_id = order_data.get("cl_ord_id", "")
             side = order_data.get("side")
+            filled_qty = order_data.get("filled_qty", order_data.get("qty", "0"))
             
-            logger.info(f"Order update: cl_ord_id={cl_ord_id}, status={status}, side={side}")
+            logger.info(f"Order update: cl_ord_id={cl_ord_id}, status={status}, side={side}, filled_qty={filled_qty}")
             
             # Clear order from local state if filled or cancelled
             if status in ("filled", "cancelled", "rejected"):
@@ -124,8 +125,13 @@ async def main(config_path: str):
                         logger.info(f"Order {status}: clearing {side} from state")
                         state.set_order(side, None)
                         
-                        # Trigger a check to potentially place new order
-                        maker._pending_check.set()
+                        # If filled, trigger immediate close and reorder
+                        if status == "filled":
+                            logger.info(f"Order FILLED! Triggering immediate close position for {side}")
+                            asyncio.create_task(maker.close_position_and_reorder(side, float(filled_qty)))
+                        else:
+                            # Trigger a check to potentially place new order
+                            maker._pending_check.set()
         
         user_ws.on_order(on_order)
         

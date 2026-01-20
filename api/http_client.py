@@ -236,7 +236,7 @@ class StandXHTTPClient:
         response.raise_for_status()
         
         result = response.json()
-        logger.info(f"[Latency] {path} responded in {latency_ms:.0f}ms")
+        logger.info(f"[Latency] {path} responded in {latency_ms:.0f}ms, response: {result}")
         
         # Write latency to log file
         self._write_latency(path, latency_ms)

@@ -23,9 +23,14 @@ venv/
 *.log
 logs/
 
+# Docker
+docker-compose.override.yml
+
 # OS
 .DS_Store
 Thumbs.db
 
 # PRD (Product Requirements Documents)
 prd/
+
+.kiro
