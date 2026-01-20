@@ -377,6 +377,9 @@ class Maker:
                     f"{self.config.symbol} 仓位超限，强制平仓 {close_qty:.4f}",
                     priority="high"
                 )
+                # Update local state and wait for execution
+                self.state.update_position(0.0)
+                await asyncio.sleep(1.0)
             else:
                 logger.error(f"Force close failed: {response}")
                 send_notify(
@@ -384,6 +387,8 @@ class Maker:
                     f"{self.config.symbol} 强制平仓失败: {response}",
                     priority="high"
                 )
+                # Wait before retry to avoid spam
+                await asyncio.sleep(5.0)
         except Exception as e:
             logger.error(f"Force close error: {e}")
             send_notify(
@@ -391,6 +396,7 @@ class Maker:
                 f"{self.config.symbol} 强制平仓异常: {e}",
                 priority="high"
             )
+            await asyncio.sleep(5.0)
 
     async def _check_and_reduce_position(self) -> bool:
         """
