@@ -140,12 +140,13 @@ class Maker:
             logger.debug("Waiting for price data...")
             return
         
-        # Step 1: Check position
+        # Step 1: Check position - auto close if too large
         if abs(self.state.position) >= self.config.max_position_btc:
             logger.warning(
                 f"Position too large: {self.state.position} >= {self.config.max_position_btc}, "
-                "pausing market making"
+                "closing position..."
             )
+            await self._force_close_position()
             return
         
         # Step 1.5: Check if should reduce position (> 50% and profitable)
@@ -344,6 +345,53 @@ class Maker:
             # Still trigger reorder even if close failed
             self._pending_check.set()
     
+    async def _force_close_position(self):
+        """Force close entire position when it exceeds max limit."""
+        if abs(self.state.position) < 0.001:
+            return
+        
+        close_side = "sell" if self.state.position > 0 else "buy"
+        close_qty = abs(self.state.position)
+        
+        cl_ord_id = f"force-close-{uuid.uuid4().hex[:8]}"
+        qty_str = f"{close_qty:.3f}"
+        
+        logger.info(f"Force closing position: {close_side} {qty_str} (cl_ord_id: {cl_ord_id})")
+        
+        try:
+            response = await self.client.new_order(
+                symbol=self.config.symbol,
+                side=close_side,
+                qty=qty_str,
+                price="0",
+                cl_ord_id=cl_ord_id,
+                order_type="market",
+                reduce_only=True,
+            )
+            
+            if response.get("code") == 0 or "id" in response:
+                logger.info(f"Force close order placed: {cl_ord_id}")
+                self._write_reduce_log("FORCE_CLOSE", -close_qty if close_side == "sell" else close_qty, "max_position_exceeded")
+                send_notify(
+                    "强制平仓",
+                    f"{self.config.symbol} 仓位超限，强制平仓 {close_qty:.4f}",
+                    priority="high"
+                )
+            else:
+                logger.error(f"Force close failed: {response}")
+                send_notify(
+                    "强制平仓失败",
+                    f"{self.config.symbol} 强制平仓失败: {response}",
+                    priority="high"
+                )
+        except Exception as e:
+            logger.error(f"Force close error: {e}")
+            send_notify(
+                "强制平仓异常",
+                f"{self.config.symbol} 强制平仓异常: {e}",
+                priority="high"
+            )
+
     async def _check_and_reduce_position(self) -> bool:
         """
         Check if position should be reduced and execute.
