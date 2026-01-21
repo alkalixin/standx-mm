@@ -284,6 +284,8 @@ class Maker:
         """
         Close position immediately after a fill, then place new orders.
         
+        Flow: Cancel all orders -> Close position -> Reorder
+        
         Args:
             filled_side: The side that was filled ('buy' or 'sell')
             filled_qty: The quantity that was filled
@@ -291,12 +293,25 @@ class Maker:
         logger.info(f"=== FILL DETECTED: {filled_side} {filled_qty:.4f} - Closing position immediately ===")
         
         try:
-            # Determine close side: if buy was filled (we're now long), sell to close
-            # if sell was filled (we're now short), buy to close
+            # Step 1: Cancel all open orders first
+            logger.info("Step 1: Cancelling all open orders...")
+            for side in ["buy", "sell"]:
+                order = self.state.get_order(side)
+                if order:
+                    try:
+                        await self.client.cancel_order(order.cl_ord_id)
+                        self.state.set_order(side, None)
+                        logger.info(f"Cancelled {side} order: {order.cl_ord_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to cancel {side} order: {e}")
+                        self.state.set_order(side, None)  # Clear state anyway
+            
+            await asyncio.sleep(0.2)  # Brief pause after cancels
+            
+            # Step 2: Close position
+            logger.info("Step 2: Closing position...")
             close_side = "sell" if filled_side == "buy" else "buy"
             
-            # Place market order to close the position
-            import uuid
             cl_ord_id = f"close-{uuid.uuid4().hex[:8]}"
             qty_str = f"{filled_qty:.3f}"
             
@@ -320,6 +335,7 @@ class Maker:
                     f"{self.config.symbol} {filled_side} 成交 {filled_qty:.4f}，已市价平仓",
                     priority="normal"
                 )
+                self.state.update_position(0.0)
             else:
                 logger.error(f"Close order failed: {response}")
                 send_notify(
@@ -328,11 +344,9 @@ class Maker:
                     priority="high"
                 )
             
-            # Wait a bit for the close order to execute
+            # Step 3: Wait for close order to execute, then trigger reorder
             await asyncio.sleep(0.5)
-            
-            # Trigger reorder
-            logger.info("Triggering reorder after close...")
+            logger.info("Step 3: Triggering reorder...")
             self._pending_check.set()
             
         except Exception as e:
