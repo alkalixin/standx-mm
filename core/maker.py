@@ -152,6 +152,12 @@ class Maker:
                 logger.warning(f"[Sync] Position mismatch: local={self.state.position}, actual={actual_pos}")
                 self.state.update_position(actual_pos)
             
+            # If there's any position, close it immediately
+            if abs(actual_pos) > 0.0001:
+                logger.warning(f"[Sync] Found position {actual_pos}, closing immediately...")
+                await self._close_any_position(actual_pos)
+                return  # Skip order sync this round, will sync next time
+            
             # Sync orders
             open_orders = await self.client.query_open_orders(self.config.symbol)
             actual_buy = None
@@ -166,7 +172,7 @@ class Maker:
             # Check buy order
             local_buy = self.state.get_order("buy")
             if local_buy and not actual_buy:
-                logger.warning(f"[Sync] Buy order missing on exchange, clearing local state")
+                logger.warning("[Sync] Buy order missing on exchange, clearing local state")
                 self.state.set_order("buy", None)
             elif not local_buy and actual_buy:
                 logger.warning(f"[Sync] Found buy order on exchange not in local state: {actual_buy.cl_ord_id}")
@@ -174,7 +180,7 @@ class Maker:
             # Check sell order
             local_sell = self.state.get_order("sell")
             if local_sell and not actual_sell:
-                logger.warning(f"[Sync] Sell order missing on exchange, clearing local state")
+                logger.warning("[Sync] Sell order missing on exchange, clearing local state")
                 self.state.set_order("sell", None)
             elif not local_sell and actual_sell:
                 logger.warning(f"[Sync] Found sell order on exchange not in local state: {actual_sell.cl_ord_id}")
@@ -183,6 +189,67 @@ class Maker:
             
         except Exception as e:
             logger.error(f"[Sync] Failed to sync state: {e}")
+    
+    async def _close_any_position(self, position: float):
+        """Close any existing position (long or short)."""
+        close_side = "sell" if position > 0 else "buy"
+        close_qty = abs(position)
+        
+        # First cancel all orders to free up margin
+        logger.info("[ClosePos] Step 1: Cancelling all orders...")
+        try:
+            open_orders = await self.client.query_open_orders(self.config.symbol)
+            if open_orders:
+                cl_ord_ids = [o.cl_ord_id for o in open_orders if o.cl_ord_id]
+                if cl_ord_ids:
+                    await self.client.cancel_orders(cl_ord_ids)
+                    logger.info(f"[ClosePos] Cancelled {len(cl_ord_ids)} orders")
+            self.state.clear_all_orders()
+        except Exception as e:
+            logger.warning(f"[ClosePos] Failed to cancel orders: {e}")
+            self.state.clear_all_orders()
+        
+        await asyncio.sleep(0.3)
+        
+        # Close position
+        logger.info(f"[ClosePos] Step 2: Closing position {position} with {close_side} {close_qty}...")
+        cl_ord_id = f"sync-close-{uuid.uuid4().hex[:8]}"
+        qty_str = f"{close_qty:.3f}"
+        
+        try:
+            response = await self.client.new_order(
+                symbol=self.config.symbol,
+                side=close_side,
+                qty=qty_str,
+                price="0",
+                cl_ord_id=cl_ord_id,
+                order_type="market",
+                reduce_only=True,
+            )
+            
+            if response.get("code") == 0 or "id" in response:
+                logger.info(f"[ClosePos] Close order placed: {cl_ord_id}")
+                self._write_reduce_log("SYNC_CLOSE", -close_qty if close_side == "sell" else close_qty, "sync_detected_position")
+                send_notify(
+                    "同步平仓",
+                    f"{self.config.symbol} 检测到仓位 {position:.4f}，已平仓",
+                    priority="normal"
+                )
+                self.state.update_position(0.0)
+            else:
+                logger.error(f"[ClosePos] Close order failed: {response}")
+                send_notify(
+                    "同步平仓失败",
+                    f"{self.config.symbol} 平仓失败: {response}",
+                    priority="high"
+                )
+        except Exception as e:
+            logger.error(f"[ClosePos] Close order error: {e}")
+            send_notify(
+                "同步平仓异常",
+                f"{self.config.symbol} 平仓异常: {e}",
+                priority="high"
+            )
     
     async def stop(self):
         """Stop the maker loop."""
