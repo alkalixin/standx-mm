@@ -4,6 +4,7 @@ Event-driven design:
 - Price updates trigger order checks
 - Order placement runs when conditions are met
 """
+import time
 import uuid
 import logging
 import asyncio
@@ -108,6 +109,7 @@ class Maker:
     async def run(self):
         """Run the event-driven maker loop."""
         self._running = True
+        self._last_sync_time = time.time()
         logger.info("Maker started (event-driven mode)")
         
         while self._running:
@@ -120,6 +122,12 @@ class Maker:
                     # Periodic check even without price updates
                     pass
                 
+                # Periodic sync every 30 seconds
+                now = time.time()
+                if now - self._last_sync_time >= 30:
+                    await self._sync_state()
+                    self._last_sync_time = now
+                
                 await self._tick()
                 
             except Exception as e:
@@ -127,6 +135,54 @@ class Maker:
                 await asyncio.sleep(1)  # Brief pause on error
         
         logger.info("Maker stopped")
+    
+    async def _sync_state(self):
+        """Sync local state with exchange (orders and position)."""
+        logger.info("[Sync] Syncing state with exchange...")
+        
+        try:
+            # Sync position
+            positions = await self.client.query_positions(self.config.symbol)
+            if positions:
+                actual_pos = positions[0].qty
+            else:
+                actual_pos = 0.0
+            
+            if abs(actual_pos - self.state.position) > 0.0001:
+                logger.warning(f"[Sync] Position mismatch: local={self.state.position}, actual={actual_pos}")
+                self.state.update_position(actual_pos)
+            
+            # Sync orders
+            open_orders = await self.client.query_open_orders(self.config.symbol)
+            actual_buy = None
+            actual_sell = None
+            
+            for order in open_orders:
+                if order.side == "buy" and order.cl_ord_id.startswith("mm-"):
+                    actual_buy = order
+                elif order.side == "sell" and order.cl_ord_id.startswith("mm-"):
+                    actual_sell = order
+            
+            # Check buy order
+            local_buy = self.state.get_order("buy")
+            if local_buy and not actual_buy:
+                logger.warning(f"[Sync] Buy order missing on exchange, clearing local state")
+                self.state.set_order("buy", None)
+            elif not local_buy and actual_buy:
+                logger.warning(f"[Sync] Found buy order on exchange not in local state: {actual_buy.cl_ord_id}")
+            
+            # Check sell order
+            local_sell = self.state.get_order("sell")
+            if local_sell and not actual_sell:
+                logger.warning(f"[Sync] Sell order missing on exchange, clearing local state")
+                self.state.set_order("sell", None)
+            elif not local_sell and actual_sell:
+                logger.warning(f"[Sync] Found sell order on exchange not in local state: {actual_sell.cl_ord_id}")
+            
+            logger.info(f"[Sync] Complete: position={actual_pos}, buy={actual_buy is not None}, sell={actual_sell is not None}")
+            
+        except Exception as e:
+            logger.error(f"[Sync] Failed to sync state: {e}")
     
     async def stop(self):
         """Stop the maker loop."""
