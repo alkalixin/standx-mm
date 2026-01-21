@@ -284,7 +284,7 @@ class Maker:
         """
         Close position immediately after a fill, then place new orders.
         
-        Flow: Cancel all orders -> Close position -> Reorder
+        Flow: Cancel ALL orders (from exchange) -> Close position -> Reorder
         
         Args:
             filled_side: The side that was filled ('buy' or 'sell')
@@ -293,20 +293,26 @@ class Maker:
         logger.info(f"=== FILL DETECTED: {filled_side} {filled_qty:.4f} - Closing position immediately ===")
         
         try:
-            # Step 1: Cancel all open orders first
-            logger.info("Step 1: Cancelling all open orders...")
-            for side in ["buy", "sell"]:
-                order = self.state.get_order(side)
-                if order:
-                    try:
-                        await self.client.cancel_order(order.cl_ord_id)
-                        self.state.set_order(side, None)
-                        logger.info(f"Cancelled {side} order: {order.cl_ord_id}")
-                    except Exception as e:
-                        logger.warning(f"Failed to cancel {side} order: {e}")
-                        self.state.set_order(side, None)  # Clear state anyway
+            # Step 1: Query and cancel ALL open orders from exchange (not just local state)
+            logger.info("Step 1: Querying and cancelling ALL open orders from exchange...")
+            try:
+                open_orders = await self.client.query_open_orders(self.config.symbol)
+                if open_orders:
+                    cl_ord_ids = [o.cl_ord_id for o in open_orders if o.cl_ord_id]
+                    logger.info(f"Found {len(open_orders)} open orders to cancel: {cl_ord_ids}")
+                    
+                    if cl_ord_ids:
+                        await self.client.cancel_orders(cl_ord_ids)
+                        logger.info(f"Cancelled {len(cl_ord_ids)} orders")
+                else:
+                    logger.info("No open orders found")
+            except Exception as e:
+                logger.warning(f"Failed to query/cancel orders: {e}")
             
-            await asyncio.sleep(0.2)  # Brief pause after cancels
+            # Clear local state
+            self.state.clear_all_orders()
+            
+            await asyncio.sleep(0.3)  # Wait for cancels to settle
             
             # Step 2: Close position
             logger.info("Step 2: Closing position...")
